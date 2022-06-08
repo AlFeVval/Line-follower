@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+import rospy
 import time
 import cv2
 import imutils
 import numpy as np
-import rospy
-from jetracer.nvidia_racecar import NvidiaRacecar
+from std_msgs.msg import Float32
 
 """ Definicion de variables globales """
-MAX_FPS = 1 #1/n
+MAX_FPS = 1/3 #1/n lecturas por frame
 lastPublication = 0
+globalFrame = None
 
 #Gstreamer pipeline settings
 def gstreamer_pipeline(
@@ -70,15 +71,38 @@ def getContours(image):
     cnts = imutils.grab_contours(cnts)
     return cnts
 
+def setFrame(img):
+    globalFrame = img
 
+def startRecord():
+    global lastPublication
+    global MAX_FPS
+    cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
+    run = cap.isOpened()
+    while(run):
+        ret,frame = cap.read()
+        if np.abs(time.time()-lastPublication) > MAX_FPS:
+            try:
+                setFrame(frame)
+            except Exception as e:
+                print(e)
+            lastPublication = time.time()
+        #cv2.imshow("Frame",frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            run = False
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+
+global rate
 class follower:
     def __init__(self):
+        self.giro = 0.0
         #ROS INIT
-        self.car = NvidiaRacecar()
-        self.car.steering = rospy.Publisher('throttle', Float32, queue_size=8)
-        self.car.throttle = rospy.Publisher('steering', Float32, queue_size=8)
-        rospy.init_node('line_followe', anonymous=True)
-        rate = rospy.Rate(10) # 10hz
+        self.pub_steering = rospy.Publisher('steering', Float32, queue_size=8)
+        self.pub_throttle = rospy.Publisher('throttle', Float32, queue_size=8)
+        rospy.init_node('line_follower', anonymous=True)
+        self.rate = rospy.Rate(1) # 30hz
         #CONTROL INIT
         self.my_centroid = 0,0
         self.prev_centroid = 0,0
@@ -86,71 +110,52 @@ class follower:
         self.prev_error = 0,0
 
     def centroidToTurn(self):
-        kd = self.error[0]/30
+        kp = float(1/75)
+        kd = float(1/500)
         self.error = (self.prev_centroid[0] - self.my_centroid[0]),(self.prev_centroid[1] - self.my_centroid[1])
         print("Error: "+str(self.error)+", Prev_error:"+str(self.prev_error))
         if(self.prev_error[0] > self.error[0]):
             print("<==== giro a la izquierda")
-            if (kd*-1.0 < -1.0):
-                giro = -1.0
-            else:
-                giro = kd*-1.0
+            self.giro = kp*float(self.prev_error[0]) + kd*float(self.error[0])
         if(self.prev_error[0] < self.error[0]):
             print("giro a la derecha ====>")
-            if (kd*-1.0 > 1.0):
-                giro = 1.0
-            else:
-                giro = kd*-1.0
+            self.giro = kp*float(self.prev_error[0]) + kd*float(self.error[0])
         if(self.prev_error[0] == self.error[0]):
             print(" ==== En linea  ====")
-            giro = 0.05
+            self.giro = 0.05
         self.prev_centroid = (self.my_centroid[0],self.my_centroid[1])
         self.prev_error = (self.error[0],self.error[1])
-        while not rospy.is_shutdown():
-            throttle = -0.1 #Left thumbstick Y
-            steering = giro #Right thumbstick X
-            #Pubblish gamepad values
-            self.car.throttle.publish(throttle)
-            self.car.steering.publish(steering)
-            rate.sleep()
 
-    def stop():
-        throttle = 0.0
-        self.car.throttle.publish(throttle)
+    def stop(self):
+        while rospy.is_shutdown():
+            throttle = 0.0 
+            steering = 0.0
+            #Pubblish values
+            self.pub_throttle.publish(throttle)
+            self.pub_steering.publish(steering)
+            self.rate.sleep()
+
+    def movement(self):
+        while not rospy.is_shutdown():
+            self.centroidToTurn()
+            throttle = 0.35 
+            steering = self.giro
+            #Pubblish values
+            self.pub_throttle.publish(throttle)
+            self.pub_steering.publish(steering)
+            self.rate.sleep()
 
 if __name__ == '__main__':
-    #Camara init
-    cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
-    while(cap.isOpened()):
-        ret,frame = cap.read()
-        frame_b = process_image(frame)
-        cropped = region_of_interest(frame_b)
-        contours = getContours(cropped)
-        if len(contours) > 0:
-            # c = max(contours, key = cv2.contourArea)
-            # print(c)
-            M = cv2.moments(cropped)
-            if M["m00"]!=0:
-                cx = int(M['m10']/M['m00'])
-                cy = int(M['m01']/M['m00'])
-                self.my_centroid = cx,cy
-            cv2.circle(frame,(cx,cy),5,(0,0,255),-1)
-        self.centroidToTurn()
+    try:
+        #line_follower init
+        startRecord()
+        cv2.imshow("Frame",globalFrame)
+        #my_follower = follower()
+        
+    except rospy.ROSInterruptException:
+        pass
+    
 
-        if np.abs(time.time()-lastPublication) > MAX_FPS:
-                try:
-                    my_follower.centroidToTurn()
-                    # my_follower.printCentroid()
-                except Exception as e:
-                    print(e)
-                lastPublication = time.time()
-
-        cv2.imshow("Frame",frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-    my_follower.stop()
     # cap = cv2.VideoCapture("circuito.mp4")
     # my_follower = follower()
     # while(cap.isOpened()):
